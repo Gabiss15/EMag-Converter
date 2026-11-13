@@ -1,8 +1,9 @@
+%%writefile app.py
+import os
 import re
+import shutil
 import subprocess
 import streamlit as st
-
-#Classe de manipulação de unidades
 
 
 class EMUnitsSession:
@@ -10,25 +11,51 @@ class EMUnitsSession:
     def __init__(self):
         self.historico = []
 
+    def _obter_comando_units(self):
+        if shutil.which("units"):
+            return "units"
+        elif os.path.exists("units.exe"):
+            return "./units.exe"
+        else:
+            return "units"
+
     def _format_token(self, tok, is_denom=False):
         tok = tok.strip()
         if not tok:
             return ""
+
+        # Garante barras duplas em comandos LaTeX (ex: \\Theta) para o Markdown do Streamlit
+        if tok.startswith("\\"):
+            if tok.startswith("\\\\"):
+                base = tok
+            else:
+                base = "\\" + tok
+        else:
+            base = f"\\text{{{tok}}}"
+
         if "^" in tok:
-            base, exp = tok.split("^", 1)
+            partes = tok.split("^", 1)
+            b = partes[0].strip()
+            exp = partes[1].strip()
+
+            if b.startswith("\\"):
+                base_fmt = b if b.startswith("\\\\") else "\\" + b
+            else:
+                base_fmt = f"\\text{{{b}}}"
+
             try:
                 exp_num = int(exp)
                 if is_denom:
                     exp_num = -exp_num
-                return f"\\text{{{base}}}^{{{exp_num}}}"
+                return f"{base_fmt}^{{{exp_num}}}"
             except ValueError:
                 if is_denom:
-                    return f"\\text{{{base}}}^{{-({exp})}}"
-                return f"\\text{{{base}}}^{{{exp}}}"
+                    return f"{base_fmt}^{{-({exp})}}"
+                return f"{base_fmt}^{{{exp}}}"
         else:
             if is_denom:
-                return f"\\text{{{tok}}}^{{{-1}}}"
-            return f"\\text{{{tok}}}"
+                return f"{base}^{{{-1}}}"
+            return f"{base}"
 
     def formatar_estilo_livro(self, expr):
         s = expr.strip()
@@ -67,7 +94,9 @@ class EMUnitsSession:
                     if t
                 ]
                 fmt_tokens += [
-                    self._format_token(t, is_denom=True) for t in den_tokens if t
+                    self._format_token(t, is_denom=True)
+                    for t in den_tokens
+                    if t
                 ]
                 unit_fmt = "\\ ".join(fmt_tokens)
             else:
@@ -88,7 +117,7 @@ class EMUnitsSession:
             return ""
 
     def calc(self, entrada, destino=""):
-        cmd = ["units", "-t", entrada]
+        cmd = [self._obter_comando_units(), "-t", entrada]
         if destino:
             cmd.append(destino)
 
@@ -109,86 +138,107 @@ class EMUnitsSession:
         except FileNotFoundError:
             return (
                 None,
-                "⚠️ **Erro:** O GNU Units não está instalado no sistema.",
+                "⚠️ **Erro:** O GNU Units não foi encontrado no sistema.",
             )
         except subprocess.CalledProcessError:
             return None, "❌ **Erro:** Expressão ou unidade incompatível."
 
     def dim(self, expressao):
+        alias_dimensoes = {
+            "M": "kg",
+            "L": "m",
+            "T": "s",
+            "I": "A",
+            "THETA": "K",
+            "TETA": "K",
+            "\\THETA": "K",
+            "Θ": "K",
+            "MASSA": "kg",
+            "COMPRIMENTO": "m",
+            "TEMPO": "s",
+            "CORRENTE": "A",
+            "CORRENTE ELETRICA": "A",
+            "TEMPERATURA": "K",
+            "KELVIN": "K",
+            "AMPERE": "A",
+            "SEGUNDO": "s",
+            "METRO": "m",
+            "QUILOGRAMA": "kg",
+        }
+
+        expr_clean = expressao.strip()
+        expr_upper = expr_clean.upper()
+
+        if expr_upper in alias_dimensoes:
+            termo_units = alias_dimensoes[expr_upper]
+        else:
+            termo_units = expr_clean
+
         try:
             res = subprocess.run(
-                ["units", "-t", expressao],
+                [self._obter_comando_units(), "-t", termo_units],
                 capture_output=True,
                 text=True,
                 check=True,
             )
             saida = res.stdout.strip()
-            unidades_str = re.sub(r"^[\d\.\+eE\-]+\s*", "", saida)
+
+            unidades_str = re.sub(r"^[+\-]?[\d\.\+eE\-]+\s*", "", saida)
 
             mapeamento = [
                 (r"\bkg\b", "M"),
                 (r"\bm\b", "L"),
                 (r"\bs\b", "T"),
                 (r"\bA\b", "I"),
-                (r"\bK\b", "Θ"),
+                (r"\bK\b", r"\Theta"),
                 (r"\bmol\b", "N"),
                 (r"\bcd\b", "J"),
             ]
 
             dimensao = unidades_str
             for padrao, simbolo in mapeamento:
-                dimensao = re.sub(padrao, simbolo, dimensao)
+                dimensao = re.sub(padrao, lambda m, s=simbolo: s, dimensao)
 
             dim_fmt = self.formatar_estilo_livro(dimensao)
             return dim_fmt, None
         except Exception:
             return (
                 None,
-                f"❌ **Erro:** Não foi possível determinar a dimensão de `{expressao}`.",
+                f"❌ **Erro:** Não foi possível determinar a dimensão de `{expressao}`. "
+                "Tente usar o nome da unidade (ex: `tesla`, `kelvin`, `volt`, `Joule`) ou constantes (ex: `G`, `k`, `c`).",
             )
 
     def constantes(self):
         lista = [
-            ("c", "Velocidade da luz no vácuo", ["units", "-t", "c"]),
-            ("h", "Constante de Planck", ["units", "-t", "h", "kg m^2 / s"]),
-            (
-                "hbar",
-                "Constante reduzida de Planck (h / 2π)",
-                ["units", "-t", "hbar", "kg m^2 / s"],
-            ),
-            ("G", "Constante gravitacional de Newton", ["units", "-t", "G"]),
-            ("e", "Carga elemental do elétron", ["units", "-t", "e", "A s"]),
-            (
-                "m_e",
-                "Massa do elétron",
-                ["units", "-t", "electronmass", "kg"],
-            ),
-            (
-                "epsilon0",
-                "Permissividade elétrica do vácuo (ε₀)",
-                ["units", "-t", "epsilon0", "A^2 s^4 / kg m^3"],
-            ),
-            (
-                "mu0",
-                "Permeabilidade magnética do vácuo (μ₀)",
-                ["units", "-t", "mu0", "kg m / A^2 s^2"],
-            ),
+            ("c", "speedoflight", "Velocidade da luz no vácuo", "$c$"),
+            ("h", "planck", "Constante de Planck", "$h$"),
+            ("hbar", "hbar", "Constante reduzida de Planck ($h / 2\\pi$)", "$\\hbar$"),
+            ("G", "gravitationalconstant", "Constante gravitacional de Newton", "$G$"),
+            ("e", "elementarycharge", "Carga elemental do elétron", "$e$"),
+            ("electronmass", "m_e", "Massa do elétron", "$m_e$"),
+            ("epsilon0", "vacuumpermittivity", "Permissividade elétrica do vácuo ($\\varepsilon_0$)", "$\\varepsilon_0$"),
+            ("mu0", "vacuumpermeability", "Permeabilidade magnética do vácuo ($\\mu_0$)", "$\\mu_0$"),
+            ("k", "boltzmann", "Constante de Boltzmann", "$k_B$"),
+            ("stefan", "stefanboltzmann", "Constante de Stefan-Boltzmann", "$\\sigma$"),
         ]
 
         tabela_dados = []
-        for sim, desc, cmd in lista:
+        for cmd_name, alias, desc, latex_sym in lista:
             try:
-                val = subprocess.run(
-                    cmd, capture_output=True, text=True
-                ).stdout.strip()
+                res = subprocess.run(
+                    [self._obter_comando_units(), "-t", cmd_name],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                val = res.stdout.strip()
                 val_fmt = self.formatar_estilo_livro(val)
-                tabela_dados.append((sim, desc, val_fmt))
+                tabela_dados.append((cmd_name, alias, latex_sym, desc, val_fmt))
             except Exception:
                 pass
         return tabela_dados
 
 
-# --- FRONTEND COM STREAMLIT ---
 
 st.set_page_config(
     page_title="Plataforma E&M — GNU Units", page_icon="⚡", layout="centered"
@@ -200,8 +250,9 @@ if "em_session" not in st.session_state:
 em = st.session_state.em_session
 
 st.title("⚡ Plataforma de Conversão e Análise E&M")
-st.caption(
-    "Backend: GNU Units | Padrão de Formatação: IUPAC / E. Richard Cohen"
+st.markdown(
+    "**Backend:** [GNU Units](https://www.gnu.org/software/units/) | "
+    "**Padrão de Formatação:** [IUPAC / E. Richard Cohen](https://iupac.org/what-we-do/books/greenbook/)"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -230,7 +281,14 @@ with tab1:
             st.markdown(f"### {res}")
 
 with tab2:
-    st.subheader("Análise Dimensional Formal $[X] = M^a L^b T^c I^d$")
+    st.subheader("Análise Dimensional Formal $[X] = M^a L^b T^c I^d \\Theta^e$")
+
+    st.info(
+        "**Convenção de Dimensões Fundamentais:**\n"
+        "- **$M$**: Massa | **$L$**: Comprimento | **$T$**: Tempo | "
+        "**$I$**: Corrente Elétrica | **$\\Theta$**: Temperatura"
+    )
+
     expr_dim = st.text_input("Grandeza ou Expressão", "G")
 
     if st.button("Analisar Dimensão"):
@@ -245,10 +303,11 @@ with tab3:
     if st.button("Carregar Tabela de Constantes"):
         dados = em.constantes()
         md_table = (
-            "| Símbolo | Descrição | Valor (Padrão Livro) |\n| :--- | :--- | :--- |\n"
+            "| Símbolo (GNU Units) | Aliases / Nomes | Símbolo (LaTeX) | Descrição | Valor Formatado (IUPAC) |\n"
+            "| :--- | :--- | :--- | :--- | :--- |\n"
         )
-        for sim, desc, val in dados:
-            md_table += f"| `{sim}` | {desc} | {val} |\n"
+        for cmd_name, alias, latex_sym, desc, val in dados:
+            md_table += f"| `{cmd_name}` | `{alias}` | {latex_sym} | {desc} | {val} |\n"
         st.markdown(md_table)
 
 with tab4:
